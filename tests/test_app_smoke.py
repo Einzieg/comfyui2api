@@ -92,6 +92,7 @@ class AppSmokeTests(unittest.TestCase):
         env = {
             "API_TOKEN": "secret-token",
             "COMFYUI_BASE_URL": "http://127.0.0.1:8188",
+            "COMFYUI_STARTUP_CHECK": "0",
             "DEFAULT_TXT2IMG_WORKFLOW": workflow_name,
             "DEFAULT_IMG2IMG_WORKFLOW": workflow_name,
             "DEFAULT_IMG2VIDEO_WORKFLOW": workflow_name,
@@ -256,6 +257,57 @@ class AppSmokeTests(unittest.TestCase):
         self.assertEqual(payload["error"]["type"], "server_error")
         self.assertEqual(payload["error"]["job_id"], "job-failed")
         self.assertIn("RuntimeError: prompt resolution failed", payload["error"]["message"])
+
+    def test_images_generations_upstream_failure_mentions_comfyui_base_url(self) -> None:
+        from comfyui2api.jobs import Job
+
+        done = asyncio.Event()
+        done.set()
+        failed_job = Job(
+            job_id="job-upstream",
+            created_at_utc="2026-03-16T00:00:00Z",
+            created_at=123,
+            status="failed",
+            kind="txt2img",
+            workflow=self.workflow_name,
+            error=(
+                "ComfyApiError: ComfyUI /prompt failed: status=502, "
+                "url=http://127.0.0.1:8188/prompt, headers={'server': 'nginx'}, body=''"
+            ),
+            done=done,
+        )
+
+        mock_create_job = AsyncMock(return_value=failed_job)
+        mock_get_job = AsyncMock(side_effect=[failed_job, failed_job])
+        with patch.object(self.app.state.jobs, "create_job", mock_create_job), patch.object(
+            self.app.state.jobs, "get_job", mock_get_job
+        ):
+            response = self.client.post(
+                "/v1/images/generations",
+                headers={"Authorization": "Bearer secret-token"},
+                json={"prompt": "cat"},
+            )
+
+        self.assertEqual(response.status_code, 500)
+        payload = response.json()
+        self.assertEqual(payload["error"]["type"], "server_error")
+        self.assertEqual(payload["error"]["job_id"], "job-upstream")
+        self.assertEqual(payload["error"]["upstream"], "comfyui")
+        self.assertEqual(payload["error"]["comfyui_base_url"], "http://127.0.0.1:8188")
+        self.assertIn("ComfyUI upstream unavailable", payload["error"]["message"])
+        self.assertIn("status=502", payload["error"]["message"])
+
+    def test_startup_fails_fast_when_comfyui_healthcheck_fails(self) -> None:
+        env = {"COMFYUI_STARTUP_CHECK": "1"}
+        with patch.dict(os.environ, env, clear=False):
+            with patch.object(self.app_module.ComfyUIClient, "system_stats", AsyncMock(side_effect=RuntimeError("bad gateway"))):
+                app = self.app_module.create_app()
+                with self.assertRaises(RuntimeError) as ctx:
+                    with TestClient(app):
+                        pass
+
+        self.assertIn("ComfyUI startup check failed", str(ctx.exception))
+        self.assertIn("COMFYUI_BASE_URL=http://127.0.0.1:8188", str(ctx.exception))
 
 
 class JobManagerErrorHandlingTests(unittest.IsolatedAsyncioTestCase):

@@ -14,6 +14,23 @@ class ComfyApiError(RuntimeError):
     pass
 
 
+def _truncate_text(value: str, *, limit: int = 1000) -> str:
+    if len(value) <= limit:
+        return value
+    return value[: limit - 3] + "..."
+
+
+def _format_http_error(endpoint: str, exc: httpx.HTTPStatusError) -> str:
+    response = exc.response
+    request = exc.request
+    body = _truncate_text(response.text)
+    headers = {k: v for k, v in response.headers.items()}
+    return (
+        f"ComfyUI {endpoint} failed: status={response.status_code}, "
+        f"url={request.url}, headers={headers}, body={body!r}"
+    )
+
+
 def _join(base_url: str, path: str) -> str:
     base = base_url.rstrip("/") + "/"
     return urljoin(base, path.lstrip("/"))
@@ -47,13 +64,19 @@ class ComfyUIClient:
     async def system_stats(self) -> Any:
         url = _join(self.base_url, "/system_stats")
         r = await self._client.get(url, headers={"Accept": "application/json"})
-        r.raise_for_status()
+        try:
+            r.raise_for_status()
+        except httpx.HTTPStatusError as e:
+            raise ComfyApiError(_format_http_error("/system_stats", e)) from e
         return r.json()
 
     async def get_queue(self) -> Any:
         url = _join(self.base_url, "/queue")
         r = await self._client.get(url, headers={"Accept": "application/json"})
-        r.raise_for_status()
+        try:
+            r.raise_for_status()
+        except httpx.HTTPStatusError as e:
+            raise ComfyApiError(_format_http_error("/queue", e)) from e
         return r.json()
 
     async def queue_prompt(
@@ -74,7 +97,7 @@ class ComfyUIClient:
         try:
             r.raise_for_status()
         except httpx.HTTPStatusError as e:
-            raise ComfyApiError(f"ComfyUI /prompt failed: {e.response.text}") from e
+            raise ComfyApiError(_format_http_error("/prompt", e)) from e
         data = r.json()
         if not isinstance(data, dict):
             raise ComfyApiError(f"Unexpected /prompt response type: {type(data).__name__}")
@@ -124,7 +147,7 @@ class ComfyUIClient:
         try:
             r.raise_for_status()
         except httpx.HTTPStatusError as e:
-            raise ComfyApiError(f"ComfyUI /upload/image failed: {e.response.text}") from e
+            raise ComfyApiError(_format_http_error("/upload/image", e)) from e
         payload = r.json()
         if not isinstance(payload, dict):
             raise ComfyApiError(f"Unexpected /upload/image response type: {type(payload).__name__}")

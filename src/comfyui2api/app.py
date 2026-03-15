@@ -4,6 +4,7 @@ import asyncio
 import base64
 import ipaddress
 import json
+import re
 import socket
 from pathlib import Path
 from typing import Any, Dict, Mapping, Optional
@@ -192,6 +193,16 @@ def _collect_standard_params(values: Mapping[str, Any], *, aliases: Mapping[str,
     return params
 
 
+def _extract_status_code(error_message: str) -> int | None:
+    match = re.search(r"status=(\d{3})", error_message or "")
+    if not match:
+        return None
+    try:
+        return int(match.group(1))
+    except ValueError:
+        return None
+
+
 def create_app() -> FastAPI:
     cfg = load_config()
     registry = WorkflowRegistry(cfg.workflows_dir)
@@ -216,6 +227,13 @@ def create_app() -> FastAPI:
 
     @app.on_event("startup")
     async def _startup() -> None:
+        if cfg.comfyui_startup_check:
+            try:
+                await comfy.system_stats()
+            except Exception as exc:
+                raise RuntimeError(
+                    f"ComfyUI startup check failed for COMFYUI_BASE_URL={cfg.comfy_base_url}: {exc}"
+                ) from exc
         await registry.load_all()
         if cfg.enable_workflow_watch:
             app.state.workflow_watch_task = asyncio.create_task(registry.watch_forever(), name="workflow-watch")
@@ -635,11 +653,25 @@ def create_app() -> FastAPI:
         if not job:
             raise _openai_error("Job not found", http_status=404)
         if job.status != "completed":
+            error_message = job.error or "Job failed"
+            extra = {"job_id": job_id}
+            status_code = _extract_status_code(error_message)
+            if "ComfyApiError: ComfyUI " in error_message:
+                extra["upstream"] = "comfyui"
+                extra["comfyui_base_url"] = cfg.comfy_base_url
+                if status_code is not None and status_code >= 500:
+                    error_message = (
+                        f"ComfyUI upstream unavailable. COMFYUI_BASE_URL={cfg.comfy_base_url}. {error_message}"
+                    )
+                else:
+                    error_message = (
+                        f"ComfyUI upstream request failed. COMFYUI_BASE_URL={cfg.comfy_base_url}. {error_message}"
+                    )
             raise _openai_error(
-                job.error or "Job failed",
+                error_message,
                 code="server_error",
                 http_status=500,
-                extra={"job_id": job_id},
+                extra=extra,
             )
         return jobs.public_job(job)
 

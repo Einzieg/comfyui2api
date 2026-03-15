@@ -59,6 +59,7 @@ class Config:
 
     worker_concurrency: int
     enable_workflow_watch: bool
+    comfyui_startup_check: bool
 
     default_txt2img_workflow: str
     default_img2img_workflow: str
@@ -96,6 +97,7 @@ def load_config() -> Config:
         http_timeout_s=_env_int("HTTP_TIMEOUT_S", 30),
         worker_concurrency=max(1, _env_int("WORKER_CONCURRENCY", 1)),
         enable_workflow_watch=_env_bool("ENABLE_WORKFLOW_WATCH", True),
+        comfyui_startup_check=_env_bool("COMFYUI_STARTUP_CHECK", True),
         default_txt2img_workflow=_env_str("DEFAULT_TXT2IMG_WORKFLOW", "文生图_z_image_turbo.json"),
         default_img2img_workflow=_env_str("DEFAULT_IMG2IMG_WORKFLOW", "图生图_flux2.json"),
         default_txt2video_workflow=_env_str("DEFAULT_TXT2VIDEO_WORKFLOW", ""),
