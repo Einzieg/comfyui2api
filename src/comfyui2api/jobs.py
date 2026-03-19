@@ -347,9 +347,15 @@ class JobManager:
             if ws_task in done:
                 exc = ws_task.exception()
                 if exc:
-                    hist_task.cancel()
-                    await asyncio.gather(hist_task, return_exceptions=True)
-                    raise exc
+                    logger.warning(
+                        "job websocket monitor failed, continuing with history polling: job_id=%s client_id=%s prompt_id=%s",
+                        job_id,
+                        client_id,
+                        qp.prompt_id,
+                        exc_info=exc,
+                    )
+                    history = await hist_task
+                    break
                 history = await hist_task
                 break
 
