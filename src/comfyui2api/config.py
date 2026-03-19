@@ -63,6 +63,8 @@ class Config:
     job_retention_seconds: int
     max_jobs_in_memory: int
     job_cleanup_interval_s: float
+    signed_url_secret: str
+    signed_url_ttl_seconds: int
 
     default_txt2img_workflow: str
     default_img2img_workflow: str
@@ -107,6 +109,8 @@ def load_config() -> Config:
         job_retention_seconds=max(0, _env_int("JOB_RETENTION_SECONDS", 604_800)),
         max_jobs_in_memory=max(0, _env_int("MAX_JOBS_IN_MEMORY", 1000)),
         job_cleanup_interval_s=job_cleanup_interval_s,
+        signed_url_secret=_env_str("SIGNED_URL_SECRET", ""),
+        signed_url_ttl_seconds=max(1, _env_int("SIGNED_URL_TTL_SECONDS", 3600)),
         default_txt2img_workflow=_env_str("DEFAULT_TXT2IMG_WORKFLOW", "文生图_z_image_turbo.json"),
         default_img2img_workflow=_env_str("DEFAULT_IMG2IMG_WORKFLOW", "图生图_flux2.json"),
         default_txt2video_workflow=_env_str("DEFAULT_TXT2VIDEO_WORKFLOW", ""),

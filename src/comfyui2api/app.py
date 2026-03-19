@@ -37,6 +37,7 @@ from .comfy_workflow import (
 from .config import Config, load_config
 from .job_retention import run_job_retention_forever
 from .jobs import JobManager
+from .signed_urls import create_signed_query, has_valid_signature, signing_secret
 from .util import (
     bearer_authorized,
     decode_data_url_base64,
@@ -78,6 +79,15 @@ def _require_auth(cfg: Config, authorization: str | None) -> None:
         raise _openai_error("Unauthorized", code="invalid_api_key", http_status=401)
 
 
+def _require_download_access(cfg: Config, request: Request, authorization: str | None) -> None:
+    if not cfg.api_token:
+        return
+    secret = signing_secret(configured_secret=cfg.signed_url_secret, api_token=cfg.api_token)
+    if has_valid_signature(path=request.url.path, query_params=request.query_params, secret=secret):
+        return
+    _require_auth(cfg, _auth_value_from_request(request, authorization))
+
+
 def _uuid_now_hex() -> str:
     import uuid
 
@@ -101,14 +111,6 @@ def _auth_value_from_request(request: Request, authorization: str | None) -> str
     if header_value:
         return header_value
     return _auth_value_from_query_params(request.query_params)
-
-
-def _bearer_token_from_auth_value(authorization: str | None) -> str | None:
-    raw = (authorization or "").strip()
-    if not raw.lower().startswith("bearer "):
-        return None
-    token = raw.split(" ", 1)[1].strip()
-    return token or None
 
 
 def _auth_value_from_ws(ws: WebSocket) -> str | None:
@@ -324,7 +326,7 @@ def create_app() -> FastAPI:
         output_name: str,
         authorization: Optional[str] = Header(default=None),
     ) -> Any:
-        _require_auth(cfg, _auth_value_from_request(request, authorization))
+        _require_download_access(cfg, request, authorization)
         job = await jobs.get_job(job_id)
         if not job:
             raise _openai_error("Job not found", http_status=404)
@@ -635,20 +637,30 @@ def create_app() -> FastAPI:
             return _base_url(request) + maybe_path
         return maybe_path
 
-    def _authorized_url(request: Request, maybe_path: str, authorization: str | None) -> str:
+    def _authorized_url_parts(request: Request, maybe_path: str, authorization: str | None) -> tuple[str, int | None]:
         url = _abs_url(request, maybe_path)
         if not url or not cfg.api_token:
-            return url
+            return url, None
 
-        token = _bearer_token_from_auth_value(_auth_value_from_request(request, authorization))
-        if not token:
-            return url
+        secret = signing_secret(configured_secret=cfg.signed_url_secret, api_token=cfg.api_token)
+        if not secret:
+            return url, None
 
         parts = urlsplit(url)
         params = parse_qsl(parts.query, keep_blank_values=True)
-        if not any(key in {"authorization", "api_key", "token", "access_token"} for key, _ in params):
-            params.append(("api_key", token))
-        return urlunsplit((parts.scheme, parts.netloc, parts.path, urlencode(params), parts.fragment))
+        params = [(key, value) for key, value in params if key not in {"sig", "exp", "authorization", "api_key", "token", "access_token"}]
+        signed_query = create_signed_query(
+            path=parts.path,
+            ttl_seconds=cfg.signed_url_ttl_seconds,
+            secret=secret,
+        )
+        params.extend(signed_query.items())
+        signed_url = urlunsplit((parts.scheme, parts.netloc, parts.path, urlencode(params), parts.fragment))
+        return signed_url, int(signed_query["exp"])
+
+    def _authorized_url(request: Request, maybe_path: str, authorization: str | None) -> str:
+        url, _expires_at = _authorized_url_parts(request, maybe_path, authorization)
+        return url
 
     def _output_relpath(job_id: str, filename: str) -> str:
         return f"/runs/{job_id}/{filename}"
@@ -1261,8 +1273,9 @@ def create_app() -> FastAPI:
         quality = (job.quality or "").strip() or "standard"
 
         url = None
+        expires_at = None
         if completed:
-            url = _authorized_url(request, f"/v1/videos/{video_id}/content", authorization)
+            url, expires_at = _authorized_url_parts(request, f"/v1/videos/{video_id}/content", authorization)
 
         err = None
         if status == "failed":
@@ -1279,6 +1292,7 @@ def create_app() -> FastAPI:
             "size": size,
             "quality": quality,
             "url": url,
+            "expires_at": expires_at,
             "remixed_from_video_id": None,
             "error": err,
         }
@@ -1289,7 +1303,7 @@ def create_app() -> FastAPI:
         video_id: str,
         authorization: Optional[str] = Header(default=None),
     ) -> Any:
-        _require_auth(cfg, _auth_value_from_request(request, authorization))
+        _require_download_access(cfg, request, authorization)
         job_id = _as_job_id_from_video_id(video_id)
         job = await jobs.get_job(job_id)
         if not job:
@@ -1400,9 +1414,10 @@ def create_app() -> FastAPI:
             status = "failed"
 
         url = None
+        expires_at = None
         fmt = None
         if status == "completed":
-            url = _authorized_url(request, f"/v1/videos/{_video_id(job.job_id)}/content", authorization)
+            url, expires_at = _authorized_url_parts(request, f"/v1/videos/{_video_id(job.job_id)}/content", authorization)
             for o in job.outputs or []:
                 fn = (o.filename or "")
                 if "." in fn:
@@ -1424,6 +1439,7 @@ def create_app() -> FastAPI:
             "task_id": job.job_id,
             "status": status,
             "url": url,
+            "expires_at": expires_at,
             "format": fmt,
             "metadata": meta_out,
             "error": err,
