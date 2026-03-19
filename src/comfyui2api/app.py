@@ -24,7 +24,6 @@ from fastapi import (
 )
 from fastapi.exception_handlers import http_exception_handler
 from fastapi.responses import FileResponse, JSONResponse
-from fastapi.staticfiles import StaticFiles
 from starlette.types import ASGIApp, Message, Receive, Scope, Send
 
 from .comfy_client import ComfyUIClient
@@ -41,6 +40,7 @@ from .util import (
     bearer_authorized,
     decode_data_url_base64,
     guess_image_ext,
+    guess_media_type,
     sanitize_filename_part,
     save_input_image,
     utc_now_unix,
@@ -268,7 +268,6 @@ def create_app() -> FastAPI:
     app.state.jobs = jobs
 
     cfg.runs_dir.mkdir(parents=True, exist_ok=True)
-    app.mount("/runs", StaticFiles(directory=str(cfg.runs_dir), html=False), name="runs")
 
     @app.exception_handler(HTTPException)
     async def _http_exc_handler(request: Request, exc: HTTPException):  # type: ignore[override]
@@ -302,6 +301,34 @@ def create_app() -> FastAPI:
     @app.get("/health")
     async def health() -> Dict[str, Any]:
         return {"status": "ok"}
+
+    @app.get("/runs/{job_id}/{output_name}")
+    async def get_run_output(
+        request: Request,
+        job_id: str,
+        output_name: str,
+        authorization: Optional[str] = Header(default=None),
+    ) -> Any:
+        _require_auth(cfg, _auth_value_from_request(request, authorization))
+        job = await jobs.get_job(job_id)
+        if not job:
+            raise _openai_error("Job not found", http_status=404)
+        if job.status != "completed":
+            raise _openai_error("Output not ready", http_status=409)
+
+        pick = None
+        for item in job.outputs or []:
+            if item.filename == output_name:
+                pick = item
+                break
+        if pick is None:
+            raise _openai_error("Output not found", http_status=404)
+
+        path = (cfg.runs_dir / job_id / pick.filename).resolve()
+        if not path.exists():
+            raise _openai_error("Output file missing", http_status=500)
+
+        return FileResponse(path=str(path), media_type=pick.media_type or guess_media_type(pick.filename), filename=pick.filename)
 
     @app.get("/v1/workflows")
     async def list_workflows(authorization: Optional[str] = Header(default=None)) -> Dict[str, Any]:
@@ -568,6 +595,69 @@ def create_app() -> FastAPI:
             params.append(("api_key", token))
         return urlunsplit((parts.scheme, parts.netloc, parts.path, urlencode(params), parts.fragment))
 
+    def _output_relpath(job_id: str, filename: str) -> str:
+        return f"/runs/{job_id}/{filename}"
+
+    def _authorized_output_url(request: Request, *, job_id: str, output: Mapping[str, Any], authorization: str | None) -> str:
+        filename = str(output.get("filename") or "").strip()
+        if not filename:
+            raw_url = str(output.get("url") or "").strip()
+            filename = Path(raw_url).name if raw_url else ""
+        if not filename:
+            return ""
+        return _authorized_url(request, _output_relpath(job_id, filename), authorization)
+
+    def _rewrite_public_job_urls(request: Request, public: Dict[str, Any], authorization: str | None) -> Dict[str, Any]:
+        rewritten = dict(public)
+        outputs = []
+        raw_outputs = public.get("outputs") or []
+        for item in raw_outputs if isinstance(raw_outputs, list) else []:
+            if not isinstance(item, dict):
+                continue
+            copied = dict(item)
+            copied["url"] = _authorized_output_url(
+                request,
+                job_id=str(public.get("job_id") or ""),
+                output=copied,
+                authorization=authorization,
+            )
+            outputs.append(copied)
+        rewritten["outputs"] = outputs
+
+        raw_primary = str(public.get("url") or "").strip()
+        primary_name = Path(raw_primary).name if raw_primary else ""
+        if primary_name:
+            rewritten["url"] = _authorized_url(request, _output_relpath(str(public.get("job_id") or ""), primary_name), authorization)
+        elif outputs:
+            rewritten["url"] = outputs[0].get("url")
+        else:
+            rewritten["url"] = None
+        return rewritten
+
+    def _response_output_urls(
+        request: Request,
+        *,
+        job_id: str,
+        outputs: list[dict[str, Any]],
+        authorization: str | None,
+    ) -> list[str]:
+        urls: list[str] = []
+        for item in outputs:
+            url = _authorized_output_url(request, job_id=job_id, output=item, authorization=authorization)
+            if url:
+                urls.append(url)
+        return urls
+
+    def _first_output_filename(outputs: list[dict[str, Any]]) -> str:
+        for item in outputs:
+            filename = str(item.get("filename") or "").strip()
+            if filename:
+                return filename
+            raw_url = str(item.get("url") or "").strip()
+            if raw_url:
+                return Path(raw_url).name
+        return ""
+
     @app.get("/v1/models")
     async def openai_models(authorization: Optional[str] = Header(default=None)) -> Dict[str, Any]:
         _require_auth(cfg, authorization)
@@ -665,14 +755,7 @@ def create_app() -> FastAPI:
         job = await jobs.get_job(job_id)
         if not job:
             raise _openai_error("Job not found", http_status=404)
-        public = jobs.public_job(job)
-        if public.get("url"):
-            public["url"] = _abs_url(request, str(public["url"]))
-        outs = public.get("outputs") or []
-        if isinstance(outs, list):
-            for o in outs:
-                if isinstance(o, dict) and o.get("url"):
-                    o["url"] = _abs_url(request, str(o["url"]))
+        public = _rewrite_public_job_urls(request, jobs.public_job(job), authorization)
         return {"job": public}
 
     @app.get("/v1/queue")
@@ -684,15 +767,7 @@ def create_app() -> FastAPI:
             counts[j.status] = counts.get(j.status, 0) + 1
         result_items = []
         for j in items:
-            public = jobs.public_job(j)
-            if public.get("url"):
-                public["url"] = _abs_url(request, str(public["url"]))
-            outs = public.get("outputs") or []
-            if isinstance(outs, list):
-                for o in outs:
-                    if isinstance(o, dict) and o.get("url"):
-                        o["url"] = _abs_url(request, str(o["url"]))
-            result_items.append(public)
+            result_items.append(_rewrite_public_job_urls(request, jobs.public_job(j), authorization))
         return {"counts": counts, "items": result_items}
 
     @app.websocket("/v1/jobs/{job_id}/ws")
@@ -781,15 +856,21 @@ def create_app() -> FastAPI:
             return {"job_id": job.job_id, "status": "pending"}
 
         done = await _openai_wait(job.job_id)
-        urls = [o["url"] for o in (done.get("outputs") or []) if isinstance(o, dict) and o.get("url")]
+        outputs = [o for o in (done.get("outputs") or []) if isinstance(o, dict)]
+        urls = _response_output_urls(
+            request,
+            job_id=str(done.get("job_id") or job.job_id),
+            outputs=outputs,
+            authorization=authorization,
+        )
         if response_format == "b64_json":
-            if not urls:
+            filename = _first_output_filename(outputs)
+            if not filename:
                 raise _openai_error("No outputs produced", http_status=500)
-            p = Path(cfg.runs_dir) / job.job_id / Path(urls[0]).name
+            p = Path(cfg.runs_dir) / job.job_id / filename
             data = base64.b64encode(p.read_bytes()).decode("ascii")
             return {"created": utc_now_unix(), "data": [{"b64_json": data}]}
-        base = _base_url(request)
-        return {"created": utc_now_unix(), "data": [{"url": base + u} for u in urls]}
+        return {"created": utc_now_unix(), "data": [{"url": u} for u in urls]}
 
     @app.post("/v1/images/edits")
     async def openai_images_edits(
@@ -836,15 +917,21 @@ def create_app() -> FastAPI:
             return {"job_id": job.job_id, "status": "pending"}
 
         done = await _openai_wait(job.job_id)
-        urls = [o["url"] for o in (done.get("outputs") or []) if isinstance(o, dict) and o.get("url")]
+        outputs = [o for o in (done.get("outputs") or []) if isinstance(o, dict)]
+        urls = _response_output_urls(
+            request,
+            job_id=str(done.get("job_id") or job.job_id),
+            outputs=outputs,
+            authorization=authorization,
+        )
         if response_format == "b64_json":
-            if not urls:
+            filename = _first_output_filename(outputs)
+            if not filename:
                 raise _openai_error("No outputs produced", http_status=500)
-            p = Path(cfg.runs_dir) / job.job_id / Path(urls[0]).name
+            p = Path(cfg.runs_dir) / job.job_id / filename
             data = base64.b64encode(p.read_bytes()).decode("ascii")
             return {"created": utc_now_unix(), "data": [{"b64_json": data}]}
-        base = _base_url(request)
-        return {"created": utc_now_unix(), "data": [{"url": base + u} for u in urls]}
+        return {"created": utc_now_unix(), "data": [{"url": u} for u in urls]}
 
     @app.post("/v1/images/variations")
     async def openai_images_variations(
@@ -888,15 +975,21 @@ def create_app() -> FastAPI:
             return {"job_id": job.job_id, "status": "pending"}
 
         done = await _openai_wait(job.job_id)
-        urls = [o["url"] for o in (done.get("outputs") or []) if isinstance(o, dict) and o.get("url")]
+        outputs = [o for o in (done.get("outputs") or []) if isinstance(o, dict)]
+        urls = _response_output_urls(
+            request,
+            job_id=str(done.get("job_id") or job.job_id),
+            outputs=outputs,
+            authorization=authorization,
+        )
         if response_format == "b64_json":
-            if not urls:
+            filename = _first_output_filename(outputs)
+            if not filename:
                 raise _openai_error("No outputs produced", http_status=500)
-            p = Path(cfg.runs_dir) / job.job_id / Path(urls[0]).name
+            p = Path(cfg.runs_dir) / job.job_id / filename
             data = base64.b64encode(p.read_bytes()).decode("ascii")
             return {"created": utc_now_unix(), "data": [{"b64_json": data}]}
-        base = _base_url(request)
-        return {"created": utc_now_unix(), "data": [{"url": base + u} for u in urls]}
+        return {"created": utc_now_unix(), "data": [{"url": u} for u in urls]}
 
     @app.post("/v1/videos/generations")
     async def openai_videos_generations(
@@ -931,9 +1024,14 @@ def create_app() -> FastAPI:
             return {"job_id": job.job_id, "status": "pending"}
 
         done = await _openai_wait(job.job_id)
-        urls = [o["url"] for o in (done.get("outputs") or []) if isinstance(o, dict) and o.get("url")]
-        base = _base_url(request)
-        return {"created": utc_now_unix(), "data": [{"url": base + u} for u in urls]}
+        outputs = [o for o in (done.get("outputs") or []) if isinstance(o, dict)]
+        urls = _response_output_urls(
+            request,
+            job_id=str(done.get("job_id") or job.job_id),
+            outputs=outputs,
+            authorization=authorization,
+        )
+        return {"created": utc_now_unix(), "data": [{"url": u} for u in urls]}
 
     @app.post("/v1/videos/edits")
     async def openai_videos_edits(
@@ -985,9 +1083,14 @@ def create_app() -> FastAPI:
             return {"job_id": job.job_id, "status": "pending"}
 
         done = await _openai_wait(job.job_id)
-        urls = [o["url"] for o in (done.get("outputs") or []) if isinstance(o, dict) and o.get("url")]
-        base = _base_url(request)
-        return {"created": utc_now_unix(), "data": [{"url": base + u} for u in urls]}
+        outputs = [o for o in (done.get("outputs") or []) if isinstance(o, dict)]
+        urls = _response_output_urls(
+            request,
+            job_id=str(done.get("job_id") or job.job_id),
+            outputs=outputs,
+            authorization=authorization,
+        )
+        return {"created": utc_now_unix(), "data": [{"url": u} for u in urls]}
 
     def _as_job_id_from_video_id(video_id: str) -> str:
         raw = (video_id or "").strip()
