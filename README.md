@@ -54,6 +54,7 @@ Windows 下可以直接使用项目根目录的启动脚本：
 - 默认设置 `COMFYUI_BASE_URL=http://127.0.0.1:8188`
 - 默认设置 `IMAGE_UPLOAD_MODE=comfy`
 - 尝试检查 ComfyUI 是否可达
+- 如果请求端口不可绑定（例如已被占用，或被 Windows 排除端口范围保留），自动回退到下一个可用端口
 
 常用参数示例：
 
@@ -63,6 +64,12 @@ Windows 下可以直接使用项目根目录的启动脚本：
 .\start.ps1 -SkipComfyCheck
 .\start.ps1 -EnvFile .\.env
 ```
+
+提示：
+
+- 如果 `COMFYUI_STARTUP_CHECK=true` 且 ComfyUI 当前不可达，API 会在启动阶段直接退出
+- 如果你只想先把 API 起起来，等 ComfyUI 稍后可用，再把 `.env` 里的 `COMFYUI_STARTUP_CHECK=false`
+- 脚本打印出来的 `Listening on:` 才是最终实际监听端口
 
 ### ComfyUI 在 WSL 中运行
 
@@ -85,6 +92,7 @@ $env:IMAGE_UPLOAD_MODE = "comfy"
 - `PUBLIC_BASE_URL`：可选，生成输出文件 URL 用；不设置则根据请求自动推断
 
 - `COMFYUI_BASE_URL`：默认 `http://127.0.0.1:8188`
+- `COMFYUI_STARTUP_CHECK`：默认 `true`；启动时先探测 `COMFYUI_BASE_URL/system_stats`，失败则直接退出
 - `IMAGE_UPLOAD_MODE`：`auto|comfy|local`，默认 `auto`
   - `comfy`：走 ComfyUI `POST /upload/image`（推荐：API 与 ComfyUI 不共享磁盘时）
   - `local`：写本地 `COMFYUI_INPUT_DIR`
@@ -95,11 +103,23 @@ $env:IMAGE_UPLOAD_MODE = "comfy"
 - `INPUT_SUBDIR`：默认 `comfyui2api`（写入 `input` 下的子目录）
 
 - `WORKER_CONCURRENCY`：默认 `1`（同时跑多少个任务）
+- `JOB_RETENTION_SECONDS`：默认 `604800`；已完成/失败任务在内存和 `RUNS_DIR` 中保留多久
+- `MAX_JOBS_IN_MEMORY`：默认 `1000`；内存里最多保留多少个任务记录
+- `JOB_CLEANUP_INTERVAL_S`：默认 `60`；后台清理任务的扫描间隔
 
 - `DEFAULT_TXT2IMG_WORKFLOW`：默认 `文生图_z_image_turbo.json`
 - `DEFAULT_IMG2IMG_WORKFLOW`：默认 `图生图_flux2.json`
 - `DEFAULT_TXT2VIDEO_WORKFLOW`：默认空（需要你提供对应工作流）
 - `DEFAULT_IMG2VIDEO_WORKFLOW`：默认 `img2video.json`
+
+- `SIGNED_URL_SECRET`：可选；媒体下载短期签名的签名密钥，不设时回退为 `API_TOKEN`
+- `SIGNED_URL_TTL_SECONDS`：默认 `3600`；图片/视频下载链接的有效期（秒）
+
+说明：
+
+- `/v1/videos/{video_id}/content` 这类标准下载接口仍然支持 `Authorization: Bearer <token>`
+- 响应体里的 `url` / `video_url` / 图片 `response_format=url` 返回的是**短期签名链接**
+- 视频状态接口会额外返回 `expires_at`
 
 ## API
 
@@ -110,10 +130,10 @@ $env:IMAGE_UPLOAD_MODE = "comfy"
 - `POST /v1/images/edits`：图生图（multipart，字段 `image`）
 - `POST /v1/images/variations`：图生图变体（multipart，字段 `image`）
 - `POST /v1/videos`：新API/OpenAI 视频任务创建（multipart；可选 `input_reference` 作为图生视频输入）
-- `GET /v1/videos/{video_id}`：查询视频任务状态（processing/succeeded/failed + progress）
+- `GET /v1/videos/{video_id}`：查询视频任务状态（processing/succeeded/failed + progress；成功时返回短期签名 `url` 和 `expires_at`）
 - `GET /v1/videos/{video_id}/content`：下载视频内容
 - （New-API 格式）`POST /v1/video/generations`：创建视频生成任务（JSON，返回 task_id/status）
-- （New-API 格式）`GET /v1/video/generations/{task_id}`：查询任务状态（queued/in_progress/completed/failed）
+- （New-API 格式）`GET /v1/video/generations/{task_id}`：查询任务状态（queued/in_progress/completed/failed；完成时返回短期签名 `url` 和 `expires_at`）
 - （兼容旧接口）`POST /v1/videos/generations`：文生视频（需要配置默认工作流）
 - （兼容旧接口）`POST /v1/videos/edits`：图生视频（multipart，字段 `image`）
 
@@ -135,7 +155,10 @@ curl -s -X POST http://127.0.0.1:8000/v1/images/generations -H "Content-Type: ap
 
 ### 任务/队列（扩展）
 
-- `GET /v1/workflows`：列出 `WORKFLOWS_DIR` 下已加载的工作流（含 kind/mtime）
+- `GET /v1/workflows`：列出 `WORKFLOWS_DIR` 下工作流（含 kind/mtime，也会列出加载失败的 workflow 和 `load_error`）
+- `GET /v1/workflows/{name}/targets`：查看 prompt/image 自动识别候选节点
+- `GET /v1/workflows/{name}/parameters`：查看 sidecar 参数映射、候选推断和建议模板
+- `GET /v1/workflows/{name}/parameters/template`：直接返回可复制的 sidecar 模板
 - `POST /v1/jobs`：通用提交（可指定 `workflow` / `prompt_node` / `image_node` / `overrides` 等）
 - `GET /v1/jobs/{job_id}`：查询任务状态
 - `GET /v1/queue`：队列概览
@@ -156,6 +179,41 @@ curl -s http://127.0.0.1:8000/v1/workflows
 
 ```bash
 curl -s http://127.0.0.1:8000/v1/workflows/img2video.json/targets
+```
+
+如果你希望让 `size / fps / duration / seed` 这类标准参数自动落到特定节点，可以给 workflow 配一个 sidecar：
+
+```text
+comfyui-api-workflows/
+  foo.json
+  .comfyui2api/
+    foo.params.json
+```
+
+sidecar 支持两层能力：
+
+- `parameters`：把标准参数映射到具体节点输入
+- `prompt_node / negative_prompt_node / image_node`：显式指定输入 prompt / 负面 prompt / 图片应该写到哪个节点
+
+例如：
+
+```json
+{
+  "version": 1,
+  "kind": "img2video",
+  "prompt_node": "339.custom_prompt",
+  "image_node": "167.image",
+  "parameters": {
+    "fps": {
+      "type": "float",
+      "maps": [{"target": "285.value"}]
+    },
+    "duration": {
+      "type": "int",
+      "maps": [{"target": "291.value"}]
+    }
+  }
+}
 ```
 
 3) **提交任务：替换提示词（prompt/negative_prompt）**
