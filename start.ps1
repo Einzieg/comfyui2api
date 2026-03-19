@@ -28,6 +28,35 @@ function Set-EnvDefault([string]$Name, [string]$Value) {
     }
 }
 
+function Import-EnvFile([string]$Path) {
+    foreach ($line in Get-Content $Path) {
+        $trimmed = $line.Trim()
+        if ([string]::IsNullOrWhiteSpace($trimmed)) {
+            continue
+        }
+        if ($trimmed.StartsWith("#")) {
+            continue
+        }
+        if ($trimmed -notmatch "^\s*([A-Za-z_][A-Za-z0-9_]*)\s*=\s*(.*)\s*$") {
+            continue
+        }
+
+        $name = $Matches[1]
+        $value = $Matches[2].Trim()
+
+        if ($value.Length -ge 2) {
+            if (($value.StartsWith('"') -and $value.EndsWith('"')) -or ($value.StartsWith("'") -and $value.EndsWith("'"))) {
+                $value = $value.Substring(1, $value.Length - 2)
+            }
+        }
+
+        $current = [Environment]::GetEnvironmentVariable($name, "Process")
+        if ([string]::IsNullOrWhiteSpace($current)) {
+            [Environment]::SetEnvironmentVariable($name, $value, "Process")
+        }
+    }
+}
+
 function Resolve-BootstrapPython() {
     if (Test-Command "py") {
         return @("py", "-3")
@@ -191,7 +220,9 @@ if ($EnvFile) {
     if (-not (Test-Path $EnvFile)) {
         throw "ENV file not found: $EnvFile"
     }
-    [Environment]::SetEnvironmentVariable("ENV_FILE", (Resolve-Path $EnvFile).Path, "Process")
+    $resolvedEnvFile = (Resolve-Path $EnvFile).Path
+    [Environment]::SetEnvironmentVariable("ENV_FILE", $resolvedEnvFile, "Process")
+    Import-EnvFile -Path $resolvedEnvFile
 }
 
 if ($PSBoundParameters.ContainsKey("ListenHost")) {
