@@ -725,6 +725,14 @@ def create_app() -> FastAPI:
                 return Path(raw_url).name
         return ""
 
+    def _normalize_image_response_format(value: Any) -> str:
+        raw = str(value or "url").strip().lower()
+        if not raw:
+            return "url"
+        if raw in {"b64_json", "b64", "base64", "base64_json"}:
+            return "b64_json"
+        return "url"
+
     def _extract_chat_message_content(content: Any) -> tuple[list[str], str | None]:
         texts: list[str] = []
         image_value: str | None = None
@@ -931,7 +939,7 @@ def create_app() -> FastAPI:
 
         done = await _openai_wait(job.job_id)
         outputs = [o for o in (done.get("outputs") or []) if isinstance(o, dict)]
-        response_format = str(body.get("response_format") or "url").strip()
+        response_format = _normalize_image_response_format(body.get("response_format"))
 
         payload = {
             "type": "generation_result",
@@ -1127,7 +1135,7 @@ def create_app() -> FastAPI:
         )
         workflow = wf.name
         negative_prompt = str(body.get("negative_prompt") or "").strip()
-        response_format = str(body.get("response_format") or "url").strip()
+        response_format = _normalize_image_response_format(body.get("response_format"))
         standard_params = _collect_standard_params({key: body.get(key) for key in STANDARD_PARAMETER_ORDER if key in body})
 
         job = await jobs.create_job(
@@ -1209,7 +1217,7 @@ def create_app() -> FastAPI:
             outputs=outputs,
             authorization=authorization,
         )
-        if response_format == "b64_json":
+        if _normalize_image_response_format(response_format) == "b64_json":
             filename = _first_output_filename(outputs)
             if not filename:
                 raise _openai_error("No outputs produced", http_status=500)
@@ -1267,7 +1275,7 @@ def create_app() -> FastAPI:
             outputs=outputs,
             authorization=authorization,
         )
-        if response_format == "b64_json":
+        if _normalize_image_response_format(response_format) == "b64_json":
             filename = _first_output_filename(outputs)
             if not filename:
                 raise _openai_error("No outputs produced", http_status=500)

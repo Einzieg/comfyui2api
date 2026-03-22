@@ -312,6 +312,52 @@ class AppSmokeTests(unittest.TestCase):
         kwargs = mock_create_job.await_args.kwargs
         self.assertEqual(kwargs["standard_params"], {"size": "1024x768", "seed": 7, "steps": 12})
 
+    def test_images_generations_returns_b64_json_for_base64_response_format(self) -> None:
+        from comfyui2api.jobs import Job, JobOutput
+
+        done = asyncio.Event()
+        done.set()
+        job_id = "job-image-b64"
+        out_dir = Path(os.environ["RUNS_DIR"]) / job_id
+        out_dir.mkdir(parents=True, exist_ok=True)
+        out_path = out_dir / "image.png"
+        raw_bytes = b"fake-image-bytes"
+        out_path.write_bytes(raw_bytes)
+
+        job = Job(
+            job_id=job_id,
+            created_at_utc="2026-03-16T00:00:00Z",
+            created_at=123,
+            status="completed",
+            kind="txt2img",
+            workflow=self.workflow_name,
+            requested_model="test_txt2img",
+            outputs=[
+                JobOutput(
+                    filename="image.png",
+                    url=f"/runs/{job_id}/image.png",
+                    media_type="image/png",
+                    node_id="2",
+                    output_key="images",
+                )
+            ],
+            done=done,
+        )
+
+        with (
+            patch.object(self.app.state.jobs, "create_job", AsyncMock(return_value=SimpleNamespace(job_id=job_id))),
+            patch.object(self.app.state.jobs, "get_job", AsyncMock(return_value=job)),
+        ):
+            response = self.client.post(
+                "/v1/images/generations",
+                headers={"Authorization": "Bearer secret-token"},
+                json={"prompt": "cat", "response_format": "base64"},
+            )
+
+        self.assertEqual(response.status_code, 200)
+        payload = response.json()
+        self.assertEqual(base64.b64decode(payload["data"][0]["b64_json"]), raw_bytes)
+
     def test_images_edits_rejects_txt2img_workflow_with_clear_400(self) -> None:
         mock_create_job = AsyncMock()
         with patch.object(self.app.state.jobs, "create_job", mock_create_job):
