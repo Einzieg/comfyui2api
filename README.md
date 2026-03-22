@@ -128,7 +128,7 @@ $env:IMAGE_UPLOAD_MODE = "comfy"
 默认情况下接口均为 **同步返回**。如需异步并返回 `job_id` (以便前端渲染进度条)，请在 Request Header 中加上 `x-comfyui-async: 1`。
 
 - `GET /v1/models`：将工作流列表伪装为 models 返回。
-- `POST /v1/images/generations`：文生图。
+- `POST /v1/images/generations`：文生图，支持 `response_format=url`、`b64_json`、`base64`。
 - `POST /v1/images/edits`：图生图（需提交 multipart，字段为 `image`）。
 - `POST /v1/images/variations`：图生图变体（需提交 multipart，字段为 `image`）。
 - `POST /v1/videos`：视频任务创建（支持 JSON 或 multipart；可选 `input_reference` 作为图生视频输入）。
@@ -156,8 +156,16 @@ curl -s -X POST http://127.0.0.1:8000/v1/images/generations \
   -d '{"prompt":"a cute cat, pixel art"}'
 ```
 
+**调用示例（文生图 Base64 返回）：**
+```bash
+curl -s -X POST http://127.0.0.1:8000/v1/images/generations \
+  -H "Content-Type: application/json" \
+  -d '{"prompt":"a cute cat, pixel art","response_format":"b64_json"}'
+```
+
 > 💡 **媒体访问说明**：
 > - 响应体里的 `url` / `video_url` / 图片 `response_format=url` 返回的是 **短期签名链接**（防止未经授权的直链盗刷）。
+> - 图片 `response_format=b64_json` 也兼容 `base64` / `b64` / `base64_json`，返回字段统一为 `data[].b64_json`。
 > - 标准下载接口（如 `/content`）依然支持 `Authorization: Bearer <token>` 访问。
 
 ### 🛠️ 任务 / 队列（原生扩展接口）
