@@ -732,7 +732,7 @@ def create_app() -> FastAPI:
         for wf in await registry.list():
             data.append(
                 {
-                    "id": wf.name,
+                    "id": Path(wf.name).stem,
                     "object": "model",
                     "created": 0,
                     "owned_by": "comfyui",

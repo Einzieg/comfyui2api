@@ -163,14 +163,31 @@ class AppSmokeTests(unittest.TestCase):
         payload = authorized.json()
         self.assertEqual(payload["object"], "list")
         by_id = {item["id"]: item for item in payload["data"]}
-        self.assertIn(self.workflow_name, by_id)
-        self.assertEqual(by_id[self.workflow_name]["metadata"]["kind"], "txt2img")
+        self.assertIn("test_txt2img", by_id)
+        self.assertNotIn(self.workflow_name, by_id)
+        self.assertEqual(by_id["test_txt2img"]["metadata"]["kind"], "txt2img")
 
     def test_request_body_limit_returns_413(self) -> None:
         response = self.client.post("/v1/images/generations", json={"prompt": "x" * 2048})
         self.assertEqual(response.status_code, 413)
         payload = response.json()
         self.assertIn("Request body too large", payload["error"]["message"])
+
+    def test_images_generations_accepts_model_id_without_json_suffix(self) -> None:
+        mock_create_job = AsyncMock(
+            return_value=SimpleNamespace(job_id="job-images", requested_model="test_txt2img", created_at=123)
+        )
+        with patch.object(self.app.state.jobs, "create_job", mock_create_job):
+            response = self.client.post(
+                "/v1/images/generations",
+                headers={"Authorization": "Bearer secret-token", "x-comfyui-async": "true"},
+                json={"prompt": "cat", "model": "test_txt2img"},
+            )
+
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.json()["status"], "pending")
+        kwargs = mock_create_job.await_args.kwargs
+        self.assertEqual(kwargs["workflow"], self.workflow_name)
 
     def test_workflow_parameters_endpoint_exposes_sidecar_mapping(self) -> None:
         response = self.client.get(
