@@ -105,6 +105,7 @@ $env:IMAGE_UPLOAD_MODE = "comfy"
 | `RUNS_DIR` | `.\runs` | 任务输出文件的存放目录 |
 | `INPUT_SUBDIR` | `comfyui2api` | 写入 ComfyUI input 时的专属子目录 |
 | `WORKER_CONCURRENCY` | `1` | 同时并发运行的任务数量 |
+| `JOB_RETENTION_DAYS`  | *空* | 已完成/失败任务在内存和磁盘中的保留天数，设置后优先于 `JOB_RETENTION_SECONDS` |
 | `JOB_RETENTION_SECONDS`| `604800` (7天) | 已完成/失败任务在内存和磁盘中的保留时间 |
 | `MAX_JOBS_IN_MEMORY` | `1000` | 内存中最多保留的任务记录数 |
 | `JOB_CLEANUP_INTERVAL_S`| `60` | 后台清理过期任务的扫描间隔（秒） |

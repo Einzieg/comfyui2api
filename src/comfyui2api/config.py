@@ -31,6 +31,14 @@ def _env_bool(name: str, default: bool = False) -> bool:
     return raw.lower() in {"1", "true", "yes", "y", "on"}
 
 
+def _job_retention_seconds() -> int:
+    raw_days = _env_str("JOB_RETENTION_DAYS", "")
+    if raw_days:
+        days = max(0.0, _env_float("JOB_RETENTION_DAYS", 0.0))
+        return int(days * 24 * 60 * 60)
+    return max(0, _env_int("JOB_RETENTION_SECONDS", 604_800))
+
+
 def _default_comfyui_input_dir(project_root: Path) -> Path:
     workspace_root = project_root.parent
     candidate = workspace_root / "ComfyUI_windows_portable" / "ComfyUI" / "input"
@@ -106,7 +114,7 @@ def load_config() -> Config:
         worker_concurrency=max(1, _env_int("WORKER_CONCURRENCY", 1)),
         enable_workflow_watch=_env_bool("ENABLE_WORKFLOW_WATCH", True),
         comfyui_startup_check=_env_bool("COMFYUI_STARTUP_CHECK", True),
-        job_retention_seconds=max(0, _env_int("JOB_RETENTION_SECONDS", 604_800)),
+        job_retention_seconds=_job_retention_seconds(),
         max_jobs_in_memory=max(0, _env_int("MAX_JOBS_IN_MEMORY", 1000)),
         job_cleanup_interval_s=job_cleanup_interval_s,
         signed_url_secret=_env_str("SIGNED_URL_SECRET", ""),
